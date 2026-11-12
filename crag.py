@@ -154,9 +154,11 @@ def refine(question: str, docs: list[Doc]) -> str:
     joined = "\n\n".join(f"[{d.id}]\n{d.text}" for d in docs)
     out = llm(
         f"Question:\n{question}\n\nDocuments:\n{joined}\n\n"
-        "Extract only the facts from these documents that are relevant to the question, "
-        "as short bullet points, each tagged with its source id like [doc_id]. "
-        "Output nothing else. If nothing is relevant, output NONE.",
+        "Copy out the facts from these documents that help answer the question.\n"
+        "Write one bullet point per fact, in this exact format:\n"
+        f"- <the fact, written as a full sentence> [{docs[0].id}]\n"
+        "Use the id of the document the fact came from. Output only the bullet points. "
+        "If nothing is relevant, output NONE.",
     )
     return "" if out.upper().startswith("NONE") else out
 

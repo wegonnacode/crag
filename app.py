@@ -19,7 +19,17 @@ import gradio as gr
 
 import crag
 
-MODELS = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b"]
+def installed_models() -> list[str]:
+    """Models already pulled into Ollama, falling back to Qwen 2.5 sizes if Ollama is offline."""
+    try:
+        names = sorted(m.model for m in crag.ollama.list().models)
+    except Exception:
+        names = []
+    return names or ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b"]
+
+
+MODELS = installed_models()
+DEFAULT_MODEL = crag.MODEL if crag.MODEL in MODELS else MODELS[0]
 SAMPLE_RETRIEVER = crag.BM25Retriever(crag.SAMPLE_DOCS)
 
 
@@ -72,7 +82,7 @@ with gr.Blocks(title="CRAG Q&A") as demo:
                             file_types=[".pdf", ".txt", ".md"])
             status = gr.Markdown("No files uploaded. Using the built-in sample documents.")
             use_web = gr.Checkbox(value=True, label="Search the web when documents don't help")
-            model = gr.Dropdown(MODELS, value=crag.MODEL, label="Ollama model",
+            model = gr.Dropdown(MODELS, value=DEFAULT_MODEL, label="Ollama model",
                                 allow_custom_value=True)
         with gr.Column(scale=3):
             chat = gr.Chatbot(height=520, label="Chat")
