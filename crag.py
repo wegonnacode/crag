@@ -107,7 +107,7 @@ def llm(prompt: str, *, system: str = "", schema: dict | None = None,
         raise
     except ConnectionError:
         sys.exit("Can't reach Ollama. Make sure it's installed and running (http://localhost:11434).")
-    return resp.message.content.strip()
+    return (resp.message.content or "").strip()
 
 
 # --------------------------------------------------------------------------- #
