@@ -28,15 +28,33 @@ def installed_models() -> list[str]:
     return names or ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:14b"]
 
 
+def parse_args():
+    ap = argparse.ArgumentParser(description="CRAG web interface")
+    ap.add_argument("--docs", nargs="+",
+                    help="files/folders to preload as the default documents for every visitor")
+    ap.add_argument("--share", action="store_true", help="create a temporary public link")
+    ap.add_argument("--lan", action="store_true", help="listen on your local network")
+    ap.add_argument("--port", type=int, default=7860)
+    return ap.parse_known_args()[0]
+
+
+ARGS = parse_args()
+if ARGS.docs:
+    _docs = [d for p in ARGS.docs for d in crag.load_path(p)]
+    DEFAULT_RETRIEVER = crag.BM25Retriever(_docs)
+    DEFAULT_STATUS = (f"Using {len(_docs)} chunks from: "
+                      + ", ".join(os.path.basename(p) for p in ARGS.docs)
+                      + ". Upload files to ask about something else.")
+else:
+    DEFAULT_RETRIEVER = crag.BM25Retriever(crag.SAMPLE_DOCS)
+    DEFAULT_STATUS = "No files uploaded. Using the built-in sample documents."
+
 MODELS = installed_models()
 DEFAULT_MODEL = crag.MODEL if crag.MODEL in MODELS else MODELS[0]
-SAMPLE_RETRIEVER = crag.BM25Retriever(crag.SAMPLE_DOCS)
-
-
 def build_index(files):
     """Load uploaded files into a retriever (stored per browser session)."""
     if not files:
-        return None, "No files uploaded. Using the built-in sample documents."
+        return None, DEFAULT_STATUS
     docs, names = [], []
     for path in files:
         try:
@@ -59,7 +77,7 @@ def respond(question, history, retriever, use_web, model):
 
     crag.MODEL = model
     try:
-        result = crag.crag(question, retriever or SAMPLE_RETRIEVER, verbose=False, use_web=use_web)
+        result = crag.crag(question, retriever or DEFAULT_RETRIEVER, verbose=False, use_web=use_web)
         grades = ", ".join(f"`{doc}`: {g}" for doc, g in result.grades.items()) or "none retrieved"
         answer = (f"{result.answer}\n\n---\n"
                   f"<sub>Path: **{result.action}** · Retrieved: {grades}</sub>")
@@ -80,7 +98,7 @@ with gr.Blocks(title="CRAG Q&A") as demo:
         with gr.Column(scale=1, min_width=260):
             files = gr.File(label="Your documents", file_count="multiple",
                             file_types=[".pdf", ".txt", ".md"])
-            status = gr.Markdown("No files uploaded. Using the built-in sample documents.")
+            status = gr.Markdown(DEFAULT_STATUS)
             use_web = gr.Checkbox(value=True, label="Search the web when documents don't help")
             model = gr.Dropdown(MODELS, value=DEFAULT_MODEL, label="Ollama model",
                                 allow_custom_value=True)
@@ -98,12 +116,7 @@ with gr.Blocks(title="CRAG Q&A") as demo:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="CRAG web interface")
-    ap.add_argument("--share", action="store_true", help="create a temporary public link")
-    ap.add_argument("--lan", action="store_true", help="listen on your local network")
-    ap.add_argument("--port", type=int, default=7860)
-    args = ap.parse_args()
-
+    args = ARGS
     password = os.environ.get("CRAG_PASSWORD")
     auth = (os.environ.get("CRAG_USER", "user"), password) if password else None
     if args.share and not auth:

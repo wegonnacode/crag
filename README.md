@@ -30,6 +30,12 @@ A small, single-file implementation of **Corrective Retrieval-Augmented Generati
 python app.py
 ```
 
+To preload documents for every visitor, pass them with `--docs` (files or folders):
+
+```bash
+python app.py --docs "notes/module1.pdf" "notes/module2.pdf"
+```
+
 Open http://localhost:7860, upload PDFs (or `.txt` / `.md` files) and ask questions in the chat. Without uploads it uses the built-in sample documents. Each answer shows which CRAG path it took and how each retrieved chunk was graded.
 
 | Command | Who can open it |

@@ -320,8 +320,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Basic Corrective RAG with Ollama")
     ap.add_argument("question", nargs="?",
                     help="question to ask (omit to start an interactive Q&A session)")
-    ap.add_argument("--docs", help="a .pdf/.txt/.md file, or a folder of them "
-                                   "(default: built-in sample corpus)")
+    ap.add_argument("--docs", nargs="+", help="one or more .pdf/.txt/.md files or folders "
+                                              "(default: built-in sample corpus)")
     ap.add_argument("--model", default=MODEL, help=f"Ollama model (default: {MODEL})")
     ap.add_argument("-k", type=int, default=4, help="chunks to retrieve per question")
     ap.add_argument("--no-web", action="store_true",
@@ -329,7 +329,7 @@ def main() -> None:
     args = ap.parse_args()
     MODEL = args.model
 
-    docs = load_path(args.docs) if args.docs else SAMPLE_DOCS
+    docs = [d for p in args.docs for d in load_path(p)] if args.docs else SAMPLE_DOCS
     if not docs:
         sys.exit("No documents found.")
     print(f"[load]     {len(docs)} chunks indexed")
