@@ -3,12 +3,13 @@ Basic CRAG (Corrective Retrieval-Augmented Generation) with a local Ollama model
 
 Pipeline:
   1. Retrieve   - BM25 over a local document store (pure Python, no deps).
-  2. Evaluate   - The LLM grades each retrieved doc: relevant / ambiguous / irrelevant.
+  2. Evaluate   - The LLM grades all retrieved docs in one call: relevant / ambiguous / irrelevant.
   3. Correct    - Decide an action from the grades:
-                    CORRECT   (any doc relevant)      -> refine the relevant docs
+                    CORRECT   (any doc relevant)      -> keep the relevant + ambiguous docs
                     INCORRECT (all docs irrelevant)   -> discard them, search the web
-                    AMBIGUOUS (otherwise)             -> refine docs AND search the web
-  4. Generate   - The LLM answers from the corrected knowledge.
+                    AMBIGUOUS (otherwise)             -> keep the ambiguous docs AND search the web
+                  With --refine, kept docs are first condensed to key facts (slower).
+  4. Generate   - The LLM answers from the corrected knowledge (streamed as it's written).
 
 Setup:
     1. Install Ollama: https://ollama.com/download
@@ -22,6 +23,7 @@ Usage:
     python crag.py "your question" --docs ./my_docs         # folder of .pdf/.txt/.md files
     python crag.py "your question" --docs report.pdf --no-web   # never use the web
     python crag.py "your question" --model qwen2.5:3b       # use another Ollama model
+    python crag.py "your question" --docs report.pdf --refine   # condense to facts first
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterator
 
 import ollama
 from ddgs import DDGS
@@ -88,18 +91,18 @@ class BM25Retriever:
 # LLM helper (Ollama)
 # --------------------------------------------------------------------------- #
 
-def llm(prompt: str, *, system: str = "", schema: dict | None = None,
-        temperature: float = 0.0) -> str:
-    messages = []
-    if system:
-        messages.append({"role": "system", "content": system})
-    messages.append({"role": "user", "content": prompt})
+KEEP_ALIVE = "30m"  # keep the model loaded between questions (Ollama's default is 5 min)
+
+
+def _chat(messages: list[dict], *, schema: dict | None, temperature: float, stream: bool):
     try:
-        resp = ollama.chat(
+        return ollama.chat(
             model=MODEL,
             messages=messages,
             format=schema,  # JSON schema -> Ollama constrains the output to it
             options={"temperature": temperature},
+            keep_alive=KEEP_ALIVE,
+            stream=stream,
         )
     except ollama.ResponseError as e:
         if e.status_code == 404:
@@ -107,53 +110,91 @@ def llm(prompt: str, *, system: str = "", schema: dict | None = None,
         raise
     except ConnectionError:
         sys.exit("Can't reach Ollama. Make sure it's installed and running (http://localhost:11434).")
+
+
+def _messages(prompt: str, system: str) -> list[dict]:
+    msgs = [{"role": "system", "content": system}] if system else []
+    return msgs + [{"role": "user", "content": prompt}]
+
+
+def llm(prompt: str, *, system: str = "", schema: dict | None = None,
+        temperature: float = 0.0) -> str:
+    resp = _chat(_messages(prompt, system), schema=schema, temperature=temperature, stream=False)
     return (resp.message.content or "").strip()
+
+
+def llm_stream(prompt: str, *, system: str = "", temperature: float = 0.0) -> Iterator[str]:
+    """Yield the reply piece by piece as the model writes it."""
+    for part in _chat(_messages(prompt, system), schema=None, temperature=temperature, stream=True):
+        if part.message.content:
+            yield part.message.content
 
 
 # --------------------------------------------------------------------------- #
 # 2. Retrieval evaluator
 # --------------------------------------------------------------------------- #
 
-GRADE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "grade": {"type": "string", "enum": ["relevant", "ambiguous", "irrelevant"]},
-        "reason": {"type": "string"},
-    },
-    "required": ["grade", "reason"],
-}
+GRADES = ("relevant", "ambiguous", "irrelevant")
 
 
-def grade_doc(question: str, doc: Doc) -> str:
+def grade_docs(question: str, docs: list[Doc]) -> dict[str, str]:
+    """Grade all retrieved docs in ONE model call (much faster than one call per doc)."""
+    if not docs:
+        return {}
+    numbered = "\n\n".join(f"Document {i}:\n{d.text}" for i, d in enumerate(docs, start=1))
+    schema = {
+        "type": "object",
+        "properties": {
+            "grades": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "document": {"type": "integer"},
+                        "grade": {"type": "string", "enum": list(GRADES)},
+                    },
+                    "required": ["document", "grade"],
+                },
+            }
+        },
+        "required": ["grades"],
+    }
     out = llm(
-        f"Question:\n{question}\n\nDocument:\n{doc.text}\n\n"
-        "Grade whether this document contains information that helps answer the question.\n"
+        f"Question:\n{question}\n\n{numbered}\n\n"
+        "For EACH document, grade whether it contains information that helps answer the question:\n"
         "- relevant: it directly contains (part of) the answer\n"
         "- ambiguous: it is on-topic but may not contain the answer\n"
         "- irrelevant: it does not help answer the question\n"
-        'Respond in JSON: {"grade": "...", "reason": "..."}',
+        f"Return one entry for each of the {len(docs)} documents, e.g. "
+        '{"grades": [{"document": 1, "grade": "relevant"}, {"document": 2, "grade": "irrelevant"}]}',
         system="You are a strict retrieval evaluator.",
-        schema=GRADE_SCHEMA,
+        schema=schema,
     )
     try:
-        grade = json.loads(out).get("grade", "")
-    except json.JSONDecodeError:
-        grade = ""
-    # Small models occasionally misbehave; treat anything unexpected as ambiguous.
-    return grade if grade in {"relevant", "ambiguous", "irrelevant"} else "ambiguous"
+        entries = json.loads(out).get("grades", [])
+    except (json.JSONDecodeError, AttributeError):
+        entries = []
+    by_num = {e.get("document"): e.get("grade") for e in entries if isinstance(e, dict)}
+    # Small models occasionally skip a document or misbehave; treat those as ambiguous.
+    return {d.id: (by_num.get(i) if by_num.get(i) in GRADES else "ambiguous")
+            for i, d in enumerate(docs, start=1)}
 
 
 # --------------------------------------------------------------------------- #
 # 3. Corrective actions
 # --------------------------------------------------------------------------- #
 
+def as_knowledge(docs: list[Doc]) -> str:
+    """Pass chunks through unchanged, labelled with their source ids."""
+    return "\n\n".join(f"[{d.id}]\n{d.text}" for d in docs)
+
+
 def refine(question: str, docs: list[Doc]) -> str:
-    """Knowledge refinement: keep only the facts that matter for the question."""
+    """Knowledge refinement: keep only the facts that matter for the question (one extra call)."""
     if not docs:
         return ""
-    joined = "\n\n".join(f"[{d.id}]\n{d.text}" for d in docs)
     out = llm(
-        f"Question:\n{question}\n\nDocuments:\n{joined}\n\n"
+        f"Question:\n{question}\n\nDocuments:\n{as_knowledge(docs)}\n\n"
         "Copy out the facts from these documents that help answer the question.\n"
         "Write one bullet point per fact, in this exact format:\n"
         f"- <the fact, written as a full sentence> [{docs[0].id}]\n"
@@ -172,8 +213,8 @@ def rewrite_query(question: str) -> str:
     return out.strip().strip('"').splitlines()[0] if out else question
 
 
-def web_search(question: str, max_results: int = 5) -> str:
-    """External knowledge: DuckDuckGo search, then refine the snippets."""
+def web_search(question: str, max_results: int = 5, refine_results: bool = False) -> str:
+    """External knowledge: DuckDuckGo search results, optionally refined."""
     query = rewrite_query(question)
     print(f"[web]      searching: {query}")
     try:
@@ -185,21 +226,33 @@ def web_search(question: str, max_results: int = 5) -> str:
         return ""
     web_docs = [Doc(r.get("href", f"web{i}"), f"{r.get('title', '')}\n{r.get('body', '')}")
                 for i, r in enumerate(results)]
-    return refine(question, web_docs)
+    return refine(question, web_docs) if refine_results else as_knowledge(web_docs)
 
 
 # --------------------------------------------------------------------------- #
 # 4. Generation + the full pipeline
 # --------------------------------------------------------------------------- #
 
+def _answer_prompt(question: str, knowledge: str) -> str:
+    # Use a real source label as the example, so small models don't copy a made-up one.
+    first_label = re.search(r"^\[[^\]\n]+\]", knowledge, re.M)
+    example = first_label.group(0) if first_label else "[source]"
+    return (f"Knowledge:\n{knowledge or '(none)'}\n\nQuestion:\n{question}\n\n"
+            "Answer the question using only the knowledge above. After each point, cite where it "
+            "came from by copying the label in square brackets that appears above that passage, "
+            f"exactly as written (for example {example}). Never invent a label. "
+            "If the knowledge is insufficient, say so.")
+
+
+ANSWER_SYSTEM = "You are a helpful assistant that answers grounded in the provided knowledge."
+
+
+def generate_stream(question: str, knowledge: str) -> Iterator[str]:
+    return llm_stream(_answer_prompt(question, knowledge), system=ANSWER_SYSTEM, temperature=0.2)
+
+
 def generate(question: str, knowledge: str) -> str:
-    return llm(
-        f"Knowledge:\n{knowledge or '(none)'}\n\nQuestion:\n{question}\n\n"
-        "Answer the question using only the knowledge above. Cite sources in brackets. "
-        "If the knowledge is insufficient, say so.",
-        system="You are a helpful assistant that answers grounded in the provided knowledge.",
-        temperature=0.2,
-    )
+    return "".join(generate_stream(question, knowledge)).strip()
 
 
 @dataclass
@@ -210,14 +263,15 @@ class CRAGResult:
     knowledge: str = ""
 
 
-def crag(question: str, retriever: BM25Retriever, k: int = 4, verbose: bool = True,
-         use_web: bool = True) -> CRAGResult:
+def prepare(question: str, retriever: BM25Retriever, k: int = 4, verbose: bool = True,
+            use_web: bool = True, refine_docs: bool = False) -> tuple[str, dict[str, str], str]:
+    """Steps 1-3 (retrieve, evaluate, correct). Returns (action, grades, knowledge)."""
     log = print if verbose else (lambda *a, **kw: None)
 
     docs = retriever.search(question, k=k)
     log(f"[retrieve] {len(docs)} docs: {[d.id for d in docs]}")
 
-    grades = {d.id: grade_doc(question, d) for d in docs}
+    grades = grade_docs(question, docs)
     log(f"[evaluate] {grades}")
 
     relevant = [d for d in docs if grades[d.id] == "relevant"]
@@ -231,19 +285,20 @@ def crag(question: str, retriever: BM25Retriever, k: int = 4, verbose: bool = Tr
         action = "INCORRECT"
     log(f"[action]   {action}")
 
-    parts = []
-    if action == "CORRECT":
-        parts.append(refine(question, relevant))
-    elif action == "AMBIGUOUS":
-        parts.append(refine(question, ambiguous))
-        if use_web:
-            parts.append(web_search(question))
-    elif use_web:
-        parts.append(web_search(question))
+    # Keep ambiguous chunks alongside relevant ones: small graders are often over-cautious.
+    use = relevant + ambiguous
+    parts = [refine(question, use) if refine_docs else as_knowledge(use)]
+    if action != "CORRECT" and use_web:
+        parts.append(web_search(question, refine_results=refine_docs))
 
     knowledge = "\n\n".join(p for p in parts if p)
     log(f"[knowledge]\n{knowledge}\n")
+    return action, grades, knowledge
 
+
+def crag(question: str, retriever: BM25Retriever, k: int = 4, verbose: bool = True,
+         use_web: bool = True, refine_docs: bool = False) -> CRAGResult:
+    action, grades, knowledge = prepare(question, retriever, k, verbose, use_web, refine_docs)
     answer = generate(question, knowledge)
     return CRAGResult(answer=answer, action=action, grades=grades, knowledge=knowledge)
 
@@ -326,6 +381,10 @@ def main() -> None:
     ap.add_argument("-k", type=int, default=4, help="chunks to retrieve per question")
     ap.add_argument("--no-web", action="store_true",
                     help="never search the web; answer only from your documents")
+    ap.add_argument("--refine", action="store_true",
+                    help="condense retrieved text to key facts before answering (slower)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="also print the knowledge passed to the answer step")
     args = ap.parse_args()
     MODEL = args.model
 
@@ -336,10 +395,15 @@ def main() -> None:
     retriever = BM25Retriever(docs)
 
     def ask(q: str) -> None:
-        result = crag(q, retriever, k=args.k, use_web=not args.no_web)
+        action, grades, knowledge = prepare(q, retriever, k=args.k, verbose=False,
+                                            use_web=not args.no_web, refine_docs=args.refine)
+        print(f"[evaluate] {grades}\n[action]   {action}")
+        if args.verbose:
+            print(f"[knowledge]\n{knowledge}\n")
         print("=" * 60)
-        print(result.answer)
-        print("=" * 60)
+        for piece in generate_stream(q, knowledge):
+            print(piece, end="", flush=True)
+        print("\n" + "=" * 60)
 
     if args.question:
         ask(args.question)

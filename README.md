@@ -5,12 +5,15 @@ A small, single-file implementation of **Corrective Retrieval-Augmented Generati
 ## How it works
 
 1. **Retrieve.** BM25 keyword search finds the chunks of your documents that best match the question.
-2. **Evaluate.** The LLM grades each chunk as `relevant`, `ambiguous` or `irrelevant`.
+2. **Evaluate.** The LLM grades all retrieved chunks in one call as `relevant`, `ambiguous` or `irrelevant`.
 3. **Correct.** The grades decide the next step:
-   - **CORRECT** (at least one relevant chunk): keep only the facts that answer the question.
-   - **AMBIGUOUS** (nothing clearly relevant, something on-topic): use those facts *and* search the web.
+   - **CORRECT** (at least one relevant chunk): keep the relevant and ambiguous chunks, drop the rest.
+   - **AMBIGUOUS** (nothing clearly relevant, something on-topic): keep those chunks *and* search the web.
    - **INCORRECT** (nothing useful): discard the chunks and search the web (DuckDuckGo).
-4. **Generate.** The LLM answers from that knowledge and cites its sources (e.g. `[report.pdf p3#1]`, meaning page 3, chunk 1).
+   - With `--refine`, the kept text is first condensed to key facts (one extra, slow model call).
+4. **Generate.** The LLM answers from that knowledge, streaming the text as it's written, and cites its sources (e.g. `[report.pdf p3#1]`, meaning page 3, chunk 1).
+
+The model stays loaded in Ollama for 30 minutes between questions, so only the first question pays the loading time.
 
 ## Setup
 
@@ -82,6 +85,8 @@ Without `--docs`, it uses a small built-in sample corpus.
 | `--model NAME` | Ollama model to use (default `qwen2.5:7b`, or set `CRAG_MODEL`) |
 | `-k N` | Chunks retrieved per question (default 4) |
 | `--no-web` | Never fall back to web search |
+| `--refine` | Condense retrieved text to key facts before answering (slower; can help with messy documents) |
+| `-v` | Also print the text passed to the answer step |
 
 ## Notes
 

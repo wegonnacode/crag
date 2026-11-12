@@ -67,26 +67,34 @@ def build_index(files):
     return crag.BM25Retriever(docs), f"Indexed {len(docs)} chunks from: {', '.join(names)}"
 
 
-def respond(question, history, retriever, use_web, model):
+def respond(question, history, retriever, use_web, refine, model):
     question = (question or "").strip()
     if not question:
         yield "", history
         return
     history = history + [{"role": "user", "content": question}]
-    yield "", history + [{"role": "assistant", "content": "_Thinking… (this can take a minute)_"}]
 
+    def show(text):
+        return "", history + [{"role": "assistant", "content": text}]
+
+    yield show("_Checking which parts of your documents are relevant…_")
     crag.MODEL = model
+    text = ""
     try:
-        result = crag.crag(question, retriever or DEFAULT_RETRIEVER, verbose=False, use_web=use_web)
-        grades = ", ".join(f"`{doc}`: {g}" for doc, g in result.grades.items()) or "none retrieved"
-        answer = (f"{result.answer}\n\n---\n"
-                  f"<sub>Path: **{result.action}** · Retrieved: {grades}</sub>")
-    except SystemExit as e:  # crag.llm exits with a readable message when Ollama is unreachable
-        answer = f"⚠️ {e}"
+        action, grades, knowledge = crag.prepare(
+            question, retriever or DEFAULT_RETRIEVER, verbose=False,
+            use_web=use_web, refine_docs=refine)
+        graded = ", ".join(f"`{doc}`: {g}" for doc, g in grades.items()) or "none retrieved"
+        footer = f"\n\n---\n<sub>Path: **{action}** · Retrieved: {graded}</sub>"
+        yield show("_Writing the answer…_")
+        for piece in crag.generate_stream(question, knowledge):
+            text += piece
+            yield show(text)
+        yield show(text + footer)
+    except SystemExit as e:  # crag exits with a readable message when Ollama is unreachable
+        yield show(f"{text}\n\n⚠️ {e}")
     except Exception as e:
-        answer = f"⚠️ Error: {e}"
-
-    yield "", history + [{"role": "assistant", "content": answer}]
+        yield show(f"{text}\n\n⚠️ Error: {e}")
 
 
 with gr.Blocks(title="CRAG Q&A") as demo:
@@ -100,6 +108,8 @@ with gr.Blocks(title="CRAG Q&A") as demo:
                             file_types=[".pdf", ".txt", ".md"])
             status = gr.Markdown(DEFAULT_STATUS)
             use_web = gr.Checkbox(value=True, label="Search the web when documents don't help")
+            refine = gr.Checkbox(value=False,
+                                 label="Extract key facts first (slower; can help with messy documents)")
             model = gr.Dropdown(MODELS, value=DEFAULT_MODEL, label="Ollama model",
                                 allow_custom_value=True)
         with gr.Column(scale=3):
@@ -111,7 +121,7 @@ with gr.Blocks(title="CRAG Q&A") as demo:
 
     files.change(build_index, files, [retriever_state, status])
     for trigger in (box.submit, send.click):
-        trigger(respond, [box, chat, retriever_state, use_web, model], [box, chat])
+        trigger(respond, [box, chat, retriever_state, use_web, refine, model], [box, chat])
     clear.click(lambda: [], None, chat)
 
 
