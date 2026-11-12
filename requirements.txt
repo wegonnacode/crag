@@ -1,3 +1,4 @@
 ollama
 ddgs
 pypdf
+gradio

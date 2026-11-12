@@ -24,7 +24,32 @@ A small, single-file implementation of **Corrective Retrieval-Augmented Generati
    pip install -r requirements.txt
    ```
 
-## Usage
+## Web interface
+
+```bash
+python app.py
+```
+
+Open http://localhost:7860, upload PDFs (or `.txt` / `.md` files) and ask questions in the chat. Without uploads it uses the built-in sample documents. Each answer shows which CRAG path it took and how each retrieved chunk was graded.
+
+| Command | Who can open it |
+|---|---|
+| `python app.py` | Only this computer |
+| `python app.py --lan` | Any device on the same Wi-Fi, at `http://<this-PC's-IP>:7860` |
+| `python app.py --share` | Anyone, through a temporary public `https://….gradio.live` link printed in the terminal |
+
+The model still runs on the computer that started `app.py`, so that computer (with Ollama) must stay on while people use the link.
+
+To require a login, set a password before starting it (PowerShell):
+
+```powershell
+$env:CRAG_PASSWORD = "choose-a-password"
+python app.py --share
+```
+
+The user name is `user` (change it with `CRAG_USER`).
+
+## Command-line usage
 
 ```bash
 # Ask a question about a PDF

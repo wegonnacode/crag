@@ -4,6 +4,10 @@ __pycache__/
 .venv/
 venv/
 
+# Local tooling
+.claude/
+.gradio/
+
 # Secrets
 .env
 
