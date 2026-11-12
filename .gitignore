@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Your own documents (remove these lines if you want to publish them)
+docs/
+*.pdf
